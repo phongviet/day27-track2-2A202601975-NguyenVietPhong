@@ -1,25 +1,25 @@
 {
-  "timestamp": "2026-08-29T09:32:39.179559+00:00",
+  "timestamp": "2026-08-29T09:59:41.057465+00:00",
   "orders_rows": 600,
   "failed_contract_checks": 1,
   "critical_contract_failures": 0,
-  "kb_failed_contract_checks": 0,
+  "kb_failed_contract_checks": 1,
   "row_count_anomaly": {
     "is_anomaly": true,
     "score": 18.751099999999997,
     "method": "auto:mad",
-    "reason": "median=252.5, mad=12.5, threshold=3.0; baseline_source=history",
+    "reason": "median=252.5, mad=12.5, threshold=3.5; baseline_source=history",
     "context_used": [
       "day_of_week",
       "metric_name"
     ]
   },
-  "freshness_minutes": 31.469412133333332,
+  "freshness_minutes": 58.50027003333333,
   "kb_text_length_signal": {
     "is_anomaly": false,
     "score": 0.8974279661016953,
     "method": "text_length:auto:mad",
-    "reason": "median=14.815, mad=0.59, threshold=3.0; baseline_source=history",
+    "reason": "median=14.815, mad=0.59, threshold=3.5; baseline_source=history",
     "metric": "mean_text_length",
     "current_mean": 15.6
   },

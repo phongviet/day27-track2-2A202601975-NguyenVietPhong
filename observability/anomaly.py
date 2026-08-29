@@ -130,6 +130,49 @@ def mad_detector(
     }
 
 
+def _trend_residual_detector(
+    current: float,
+    values: np.ndarray,
+    expected_step: float,
+    threshold: float = 3.5,
+) -> dict[str, Any] | None:
+    """Detect deviation from an expected step-over-step trend."""
+    if values.size < 4:
+        return None
+    # Historical step errors relative to the expected trend.
+    diffs = np.diff(values)
+    residuals = diffs - expected_step
+    median_r = float(np.median(residuals))
+    mad_r = float(np.median(np.abs(residuals - median_r)))
+    actual_step = float(current) - float(values[-1])
+    actual_residual = actual_step - expected_step
+
+    if mad_r <= 1e-12:
+        deviation = abs(actual_residual - median_r)
+        if deviation <= 1e-12:
+            score = 0.0
+            is_anomaly = False
+        else:
+            score = _LARGE_SCORE
+            is_anomaly = True
+    else:
+        score = 0.6745 * abs(actual_residual - median_r) / mad_r
+        is_anomaly = score > threshold
+
+    return {
+        "is_anomaly": bool(is_anomaly),
+        "score": float(score),
+        "method": "auto:trend",
+        "reason": (
+            f"expected_step={expected_step:.6g}, "
+            f"actual_step={actual_step:.6g}, "
+            f"residual_median={median_r:.6g}, "
+            f"residual_mad={mad_r:.6g}, "
+            f"threshold={threshold}"
+        ),
+    }
+
+
 def detect_anomaly(
     current: float,
     history: Iterable[float],
@@ -173,6 +216,28 @@ def detect_anomaly(
     event_mult = 1.5 if known_event else 1.0
 
     finite_effective = _finite_history(effective_history)
+
+    # A known trend changes what "normal" means:
+    # judge the newest step rather than the absolute level.
+    trend = context.get("trend") if context else None
+    if trend is not None:
+        try:
+            expected_step = float(trend)
+        except (TypeError, ValueError):
+            expected_step = None
+        if expected_step is not None and np.isfinite(expected_step):
+            trend_result = _trend_residual_detector(
+                current,
+                finite_effective,
+                expected_step,
+                threshold=3.5 * event_mult,
+            )
+            if trend_result is not None:
+                trend_result["reason"] += f"; baseline_source={baseline_source}"
+                if context:
+                    trend_result["context_used"] = sorted(context.keys())
+                return trend_result
+
     if finite_effective.size >= 5:
         # Modified Z-Score standard threshold is 3.5
         mad_threshold = 3.5 * event_mult

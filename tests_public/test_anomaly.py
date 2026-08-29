@@ -26,3 +26,54 @@ def test_zero_mad_small_float_noise_is_not_anomaly():
     result = detect_metric(100.0001, history, method="mad")
     assert result["is_anomaly"] is False
 
+
+def test_following_known_trend_is_normal():
+    history = [1000, 1020, 1040, 1060, 1080, 1100, 1120]
+    result = detect_metric(
+        1140,
+        history,
+        method="auto",
+        context={"metric_name": "row_count", "trend": 20},
+    )
+    assert result["is_anomaly"] is False
+    assert result["method"] == "auto:trend"
+
+
+def test_trend_reversal_is_anomaly():
+    history = [1000, 1020, 1040, 1060, 1080, 1100, 1120]
+    result = detect_metric(
+        850,
+        history,
+        method="auto",
+        context={"metric_name": "row_count", "trend": 20},
+    )
+    assert result["is_anomaly"] is True
+    assert result["method"] == "auto:trend"
+
+
+def test_trend_context_changes_decision():
+    history = [100, 120, 140, 160, 180, 200, 220]
+    # Continues the +20 trend.
+    result = detect_metric(
+        240,
+        history,
+        method="auto",
+        context={"trend": 20},
+    )
+    assert result["is_anomaly"] is False
+    assert result["method"] == "auto:trend"
+
+
+def test_flattening_known_trend_is_anomaly():
+    history = [100, 120, 140, 160, 180, 200, 220]
+    # Expected ~240, but suddenly stops growing.
+    result = detect_metric(
+        220,
+        history,
+        method="auto",
+        context={"trend": 20},
+    )
+    assert result["is_anomaly"] is True
+    assert result["method"] == "auto:trend"
+
+
