@@ -71,7 +71,9 @@ def evaluate_multiwindow_burn(
     if short >= 14.4 and long >= 14.4:
         severity, page, reason = "critical", True, "sustained_fast_burn_14.4x"
     elif short >= 6.0 and long >= 6.0:
-        severity, page, reason = "warning", False, "sustained_medium_burn_6x"
+        # Slow burn: both windows elevated at 6x. SRE standard requires paging
+        # (ticket/oncall). Severity is warning, not critical, but still pages.
+        severity, page, reason = "warning", True, "sustained_medium_burn_6x"
     elif short >= 14.4 and long < 14.4:
         severity, page, reason = "warning", False, "transient_spike_suppressed"
     elif short >= 1.0 or long >= 1.0:

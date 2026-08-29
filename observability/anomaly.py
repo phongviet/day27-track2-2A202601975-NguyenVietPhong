@@ -105,7 +105,11 @@ def mad_detector(
         # inflate the denominator. Require a material departure (e.g. >= 10% or >= 0.5 absolute)
         # to avoid false positives on tiny float precision noise while catching true level shifts.
         delta = abs(current_f - median)
-        rel_diff = delta / max(abs(median), 1.0)
+        # Use the natural relative scale of the median (not clamped to 1.0)
+        # so small-valued metrics (e.g. median=0.0001) still detect 10x shifts.
+        # The absolute guard (delta >= 0.5) prevents float-noise false positives
+        # for large-valued constants (e.g. 100.000001 vs 100.0).
+        rel_diff = delta / max(abs(median), 1e-9)
         if rel_diff >= 0.1 or delta >= 0.5:
             modified_z = max(threshold + 1.0, 0.6745 * delta / max(abs(median) * 0.05, 0.1))
         else:
