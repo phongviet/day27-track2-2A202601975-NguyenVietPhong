@@ -155,6 +155,7 @@ def detect_anomaly(
     base_history = list(history)
     effective_history = base_history
     baseline_source = "history"
+    known_event = False
 
     if context:
         segment = context.get("same_segment_history")
@@ -167,15 +168,19 @@ def detect_anomaly(
                 effective_history = segment_values
                 baseline_source = "same_segment_history"
 
-        if bool(context.get("known_event", False)):
-            threshold *= 1.5
+        known_event = bool(context.get("known_event", False))
+
+    event_mult = 1.5 if known_event else 1.0
 
     finite_effective = _finite_history(effective_history)
     if finite_effective.size >= 5:
-        result = mad_detector(current, finite_effective, threshold=threshold)
+        # Modified Z-Score standard threshold is 3.5
+        mad_threshold = 3.5 * event_mult
+        result = mad_detector(current, finite_effective, threshold=mad_threshold)
         result["method"] = "auto:mad"
     else:
-        result = zscore_detector(current, finite_effective, threshold=threshold)
+        zscore_threshold = threshold * event_mult
+        result = zscore_detector(current, finite_effective, threshold=zscore_threshold)
         result["method"] = "auto:zscore"
 
     result["reason"] += f"; baseline_source={baseline_source}"
