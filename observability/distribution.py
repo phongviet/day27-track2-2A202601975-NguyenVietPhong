@@ -81,34 +81,52 @@ def detect_distribution_shift(
 
     cur_mean = float(np.mean(cur))
     base_mean = float(np.mean(base))
-    mean_ratio = _symmetric_ratio(cur_mean, base_mean)
-
     cur_std = float(np.std(cur))
     base_std = float(np.std(base))
+    pooled_std = math.sqrt(0.5 * (cur_std**2 + base_std**2))
+    location_diff = abs(cur_mean - base_mean)
+    scale_diff = abs(cur_std - base_std)
+
+    # Location test: avoid inf/false positives when means are near zero
+    if abs(base_mean) > 1e-4 and abs(cur_mean) > 1e-4:
+        mean_ratio = _symmetric_ratio(cur_mean, base_mean)
+        mean_alert = bool(
+            mean_ratio >= ratio_threshold
+            and location_diff > 0.1 * max(pooled_std, 1.0)
+        )
+    else:
+        mean_ratio = 1.0
+        standardized_diff = location_diff / max(pooled_std, 1e-6)
+        mean_alert = bool(standardized_diff >= ratio_threshold)
+
     scale_ratio = _symmetric_ratio(cur_std, base_std)
+    scale_alert = bool(scale_ratio >= ratio_threshold)
 
     ks_stat = _ks_statistic(cur, base)
     p_value = _ks_pvalue_asymptotic(ks_stat, int(cur.size), int(base.size))
 
-    # Require practical CDF separation as well as significance. D=0.25 is large
-    # enough to avoid flagging tiny differences in large samples, but catches
-    # strong shape changes with identical means.
+    # Require practical CDF separation AND material difference in location or scale.
+    # This prevents tiny float noise (< 1% scale) on discrete mass points from triggering false alarms.
     ks_practical_threshold = 0.25
+    material_difference = (
+        (location_diff / max(pooled_std, 1e-6)) >= 0.1
+        or (scale_diff / max(pooled_std, 1e-6)) >= 0.1
+        or scale_ratio >= 1.5
+    )
     ks_alert = (
         cur.size >= 4
         and base.size >= 4
         and p_value < alpha
         and ks_stat >= ks_practical_threshold
+        and material_difference
     )
 
-    mean_alert = bool(mean_ratio >= ratio_threshold)
-    scale_alert = bool(scale_ratio >= ratio_threshold)
     is_anomaly = bool(mean_alert or scale_alert or ks_alert)
 
     finite_scores = [
         (mean_ratio / ratio_threshold) if np.isfinite(mean_ratio) else 1e12,
         (scale_ratio / ratio_threshold) if np.isfinite(scale_ratio) else 1e12,
-        ks_stat / ks_practical_threshold,
+        ks_stat / ks_practical_threshold if material_difference else 0.0,
     ]
     score = float(max(finite_scores))
 
@@ -126,3 +144,5 @@ def detect_distribution_shift(
             f"ks_stat={ks_stat:.4f}, p_value={p_value:.4g}"
         ),
     }
+
+

@@ -82,11 +82,28 @@ def main() -> None:
     print(f"Total Expectations: {len(suite.expectations)}")
     print(f"Overall Result: {'PASS' if all_ok else 'FAIL'}")
 
+    # Inspect individual validation results for severity-aware triage
+    critical_failed = False
+    warning_failed = False
+    critical_columns = {"order_id", "customer_id", "amount"}
+
+    for validation_result in checkpoint_result.run_results.values():
+        for res in getattr(validation_result, "results", []):
+            if not res.success:
+                col = res.expectation_config.kwargs.get("column")
+                if col in critical_columns or "unique" in res.expectation_config.type.lower():
+                    critical_failed = True
+                else:
+                    warning_failed = True
+
     # Action / triage based on severity
-    if not all_ok:
-        print("[ACTION REQUIRED] Critical checks failed! Action: QUARANTINE / BLOCK PIPELINE.")
+    if critical_failed:
+        print("[ACTION REQUIRED] Critical expectation checks failed! Action: QUARANTINE / BLOCK PIPELINE.")
+    elif warning_failed:
+        print("[WARNING] Non-critical expectation checks failed. Action: LOG WARNING / ALLOW WITH CAUTION.")
     else:
         print("[ACTION] Data healthy. Action: PROCEED TO DOWNSTREAM MODELS.")
+
 
 
 if __name__ == "__main__":

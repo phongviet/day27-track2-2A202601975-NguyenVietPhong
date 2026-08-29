@@ -102,9 +102,14 @@ def mad_detector(
 
     if mad <= eps:
         # Robust zero-scale fallback. Do not let a sparse extreme history outlier
-        # inflate the denominator (which mean absolute deviation would do).
+        # inflate the denominator. Require a material departure (e.g. >= 10% or >= 0.5 absolute)
+        # to avoid false positives on tiny float precision noise while catching true level shifts.
         delta = abs(current_f - median)
-        modified_z = _LARGE_SCORE if delta > eps else 0.0
+        rel_diff = delta / max(abs(median), 1.0)
+        if rel_diff >= 0.1 or delta >= 0.5:
+            modified_z = max(threshold + 1.0, 0.6745 * delta / max(abs(median) * 0.05, 0.1))
+        else:
+            modified_z = 0.0
         reason = (
             f"median={median:.6g}, mad=0, zero_scale_fallback=true, "
             f"threshold={threshold}"
@@ -158,7 +163,7 @@ def detect_anomaly(
                 effective_history = segment_values
                 baseline_source = "same_segment_history"
 
-        if context.get("known_event") is not None:
+        if bool(context.get("known_event", False)):
             threshold *= 1.5
 
     finite_effective = _finite_history(effective_history)

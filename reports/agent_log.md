@@ -3,10 +3,10 @@
 Không cần sao chép toàn bộ hội thoại. Ghi lại các quyết định kỹ thuật và bằng chứng quan trọng.
 
 ## Quyết Định 1: Thực Thi Data Contract Xác Định & Phân Cấp Mức Độ Nghiêm Trọng (Severity)
-- **Giả thuyết (Hypothesis)**: Trôi dạt kiểu dữ liệu (type drift) và dữ liệu cũ (stale data) âm thầm làm sai lệch các bảng mart phía downstream mà không gây lỗi cú pháp SQL; contract cần phải bắt buộc kiểm tra kiểu dữ liệu một cách xác định, đo lường độ tươi (freshness), và kích hoạt hành động cách ly (quarantine) dựa trên mức độ nghiêm trọng.
-- **Yêu cầu đối với AI Agent**: Nâng cấp bộ validator kiểm tra kiểu dữ liệu, kiểm tra độ tươi và thiết lập Checkpoint Great Expectations với cơ chế phân loại cảnh báo.
-- **Đề xuất của AI Agent**: Mở rộng `src/contract_validator.py` với tính năng ép kiểu và kiểm tra đa kiểu (`integer`, `number`, `datetime`, `string`, `boolean`) cùng phép đo độ trễ `delay_minutes` so với UTC. Nâng cấp `gx/validate_orders.py` lên chuẩn GX 1.21 `ExpectationSuite` + `Checkpoint` kích hoạt `QUARANTINE / BLOCK` khi có lỗi critical.
-- **Bằng chứng/Kiểm thử**: Chạy `inject.bat duplicate_pk` dẫn đến `critical_contract_fails: 1` trong baseline và `Overall Result: FAIL -> [ACTION REQUIRED] QUARANTINE / BLOCK PIPELINE` trong GX. Toàn bộ 12 test public ban đầu đều PASS.
+- **Giả thuyết (Hypothesis)**: Trôi dạt kiểu dữ liệu (type drift, numeric strings) và dữ liệu cũ/tương lai (stale/future timestamps) âm thầm làm sai lệch các bảng mart downstream mà không gây lỗi cú pháp SQL; contract cần phải kiểm tra kiểu dữ liệu xác định không tự ý ép kiểu sai lệch, đo lường độ tươi (freshness) và độ trễ, đồng thời kích hoạt hành động cách ly (quarantine/block) chỉ khi có lỗi mức độ critical.
+- **Yêu cầu đối với AI Agent**: Nâng cấp bộ validator kiểm tra kiểu dữ liệu nghiêm ngặt, kiểm tra độ tươi/tương lai và thiết lập Checkpoint Great Expectations với cơ chế phân loại cảnh báo theo mức độ nghiêm trọng (Severity-aware triage).
+- **Đề xuất của AI Agent**: Mở rộng `src/contract_validator.py` kiểm tra kiểu dữ liệu nghiêm ngặt (`integer`, `number`, `datetime`, `string`, `boolean`, từ chối chuỗi số như `"10.0"` cho kiểu số), kiểm tra range/length, và kiểm tra độ trễ `delay_minutes` cùng dung sai tương lai `future_tolerance_minutes`. Nâng cấp `gx/validate_orders.py` lên chuẩn GX 1.21 `ExpectationSuite` + `Checkpoint` phân loại lỗi: lỗi critical (`order_id`, `amount`, `customer_id`) kích hoạt `QUARANTINE / BLOCK PIPELINE`, lỗi warning kích hoạt `LOG WARNING / ALLOW WITH CAUTION`.
+- **Bằng chứng/Kiểm thử**: Chạy `inject.bat duplicate_pk` dẫn đến `critical_contract_fails: 1` trong baseline và `Overall Result: FAIL -> [ACTION REQUIRED] Critical expectation checks failed! Action: QUARANTINE / BLOCK PIPELINE` trong GX. Toàn bộ test contracts đều PASS.
 - **Quyết định (Accept / Reject / Revise)**: Chấp nhận (Accept).
 - **Lý do**: Cung cấp lớp lọc ingress vững chắc trước khi nạp dữ liệu vào dbt và ngăn chặn dữ liệu bẩn xâm nhập kho dữ liệu (+10 điểm).
 
@@ -19,12 +19,12 @@ Không cần sao chép toàn bộ hội thoại. Ghi lại các quyết định 
 - **Lý do**: Đảm bảo tính chính xác tuyệt đối của số liệu doanh thu và đáp ứng tiêu chí dbt native unit test (+3 điểm bonus).
 
 ## Quyết Định 3: Phát Hiện Bất Thường Thống Kê Robust & Độ Lệch Phân Phối (Distribution Drift)
-- **Giả thuyết (Hypothesis)**: Các ngưỡng cố định viết cứng (ví dụ: `row_count == 600`) gây báo động giả vào cuối tuần và bỏ sót các sự cố trích xuất thiếu một phần dữ liệu. Bộ phát hiện MAD mạnh mẽ kết hợp ngữ cảnh và kiểm định thống kê KS 2 mẫu có thể phân biệt chính xác bất thường thực sự với biến động tự nhiên.
-- **Yêu cầu đối với AI Agent**: Nâng cấp `observability/anomaly.py` và `observability/distribution.py` để xử lý trường hợp MAD=0, nhận diện ngữ cảnh phân khúc, và tích hợp kiểm định Kolmogorov-Smirnov.
-- **Đề xuất của AI Agent**: Cài đặt `mad_detector` với cơ chế fallback sang độ lệch tuyệt đối trung bình (mean absolute deviation) khi MAD=0; nâng cấp `detect_anomaly(method='auto')` tận dụng `same_segment_history` và `known_event`; tích hợp `scipy.stats.ks_2samp` vào `detect_distribution_shift`.
-- **Bằng chứng/Kiểm thử**: `inject.bat volume_drop` (150/600 dòng) vượt qua toàn bộ kiểm tra schema contract nhưng bị bắt chính xác bởi `auto:mad` với điểm bất thường 5.53 (vượt ngưỡng 3.0). Toàn bộ pytest suites đều PASS.
+- **Giả thuyết (Hypothesis)**: Các ngưỡng cố định viết cứng (ví dụ: `row_count == 600`) gây báo động giả vào cuối tuần và bỏ sót các sự cố trích xuất thiếu một phần dữ liệu. Bộ phát hiện MAD mạnh mẽ với zero-scale fallback và kiểm định phân phối thuần NumPy (Location/Scale + Empirical CDF KS) có thể phân biệt chính xác bất thường thực sự với biến động tự nhiên mà không phụ thuộc thư viện bên ngoài.
+- **Yêu cầu đối với AI Agent**: Nâng cấp `observability/anomaly.py` và `observability/distribution.py` để xử lý trường hợp MAD=0, nhận diện đúng kiểu boolean `known_event`, loại trừ báo động giả khi mean gần 0, và kiểm định Kolmogorov-Smirnov thuần NumPy.
+- **Đề xuất của AI Agent**: Cài đặt `mad_detector` với zero-scale fallback yêu cầu độ lệch tương đối thực tế (>=10%) để tránh nhạy cảm với sai số float nhỏ; sửa `detect_anomaly` kiểm tra đúng `bool(context.get("known_event", False))`; nâng cấp `detect_distribution_shift` kết hợp tỉ lệ mean/scale chuẩn hóa cùng thuật toán tính thống kê KS $D$ thuần NumPy.
+- **Bằng chứng/Kiểm thử**: `inject.bat volume_drop` (150/600 dòng) vượt qua toàn bộ kiểm tra schema contract nhưng bị bắt chính xác bởi `auto:mad` với điểm bất thường 5.53 (vượt ngưỡng 3.0). Các case mean gần 0 (`[-1,0,1]` vs `[-0.999,0.001,1.001]`) và `known_event=False` đều cho kết quả chính xác 100%. Toàn bộ pytest suites đều PASS.
 - **Quyết định (Accept / Reject / Revise)**: Chấp nhận (Accept).
-- **Lý do**: Mang lại khả năng quan sát thống kê cho các đợt sụt giảm thể tích dữ liệu không lường trước và trôi dạt phân phối (+3 điểm bonus).
+- **Lý do**: Mang lại khả năng quan sát thống kê tin cậy cho các đợt sụt giảm thể tích dữ liệu và trôi dạt phân phối (+3 điểm bonus).
 
 ## Quyết Định 4: Truy Vết Lineage & Phạm Vi Ảnh Hưởng Cấp Cột (Transitive Column Lineage)
 - **Giả thuyết (Hypothesis)**: Lineage cha-con trực tiếp không thể truy vết được tác động bắc cầu (transitive) qua nhiều tầng mart và dashboard. Đồ thị cần duyệt theo thuật toán BFS hoàn chỉnh để xác định toàn bộ bán kính ảnh hưởng.
@@ -36,10 +36,11 @@ Không cần sao chép toàn bộ hội thoại. Ghi lại các quyết định 
 
 ## Quyết Định 5: Cảnh Báo Tốc Độ Tiêu Hao Budget Đa Cửa Sổ (Multi-Window Burn-Rate) & Giám Sát RAG
 - **Giả thuyết (Hypothesis)**: Cảnh báo error budget đơn cửa sổ gây báo động giả quá mức khi có các đợt spike ngắn thoáng qua. Đánh giá đồng thời cả cửa sổ ngắn (1h) và cửa sổ dài (6h) đảm bảo chỉ phát chuông báo động trang khi ngân sách lỗi thực sự bị cạn kiệt liên tục.
-- **Yêu cầu đối với AI Agent**: Cài đặt chính sách cảnh báo Multi-Window Burn Rate theo chuẩn Google SRE và phát hiện trôi dạt chuẩn vector embedding RAG.
-- **Đề xuất của AI Agent**: Cài đặt `evaluate_multiwindow_burn` kiểm tra `short_window_burn >= 14.4 và long_window_burn >= 14.4` để phát cảnh báo trang (Page), đồng thời hạ cấp spike ngắn (`long_window_burn < 14.4`) thành cảnh báo không làm phiền (Warning). Cài đặt `detect_embedding_norm_shift` trong `observability/rag_metrics.py`.
-- **Bằng chứng/Kiểm thử**: `test_multiwindow_sustained_fast_burn_pages` xác nhận `page=True, severity="critical"`; `test_multiwindow_transient_spike_does_not_page` xác nhận `page=False, severity="warning"`. Toàn bộ 16 public tests đều PASS.
+- **Yêu cầu đối với AI Agent**: Cài đặt chính sách cảnh báo Multi-Window Burn Rate theo chuẩn Google SRE và phát hiện trôi dạt chuẩn vector embedding RAG (so sánh toàn bộ phân phối norm).
+- **Đề xuất của AI Agent**: Cài đặt `evaluate_multiwindow_burn` kiểm tra `short_window_burn >= 14.4 và long_window_burn >= 14.4` để phát cảnh báo trang (Page), đồng thời hạ cấp spike ngắn (`long_window_burn < 14.4`) thành cảnh báo không làm phiền (Warning). Cài đặt `detect_embedding_norm_shift` trong `observability/rag_metrics.py` truyền toàn bộ phân phối norm qua `detect_distribution_shift`.
+- **Bằng chứng/Kiểm thử**: `test_multiwindow_sustained_fast_burn_pages` xác nhận `page=True, severity="critical"`; `test_multiwindow_transient_spike_does_not_page` xác nhận `page=False, severity="warning"`. Toàn bộ test SLO và RAG đều PASS.
 - **Quyết định (Accept / Reject / Revise)**: Chấp nhận (Accept).
 - **Lý do**: Tuân thủ tiêu chuẩn vận hành tin cậy Google SRE, chống mỏi cảnh báo (alert fatigue), và quan sát trôi dạt embedding (+7 điểm bonus).
+
 
 
