@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-29T09:24:43.057617+00:00",
+  "timestamp": "2026-08-29T09:25:22.994386+00:00",
   "orders_rows": 600,
   "failed_contract_checks": 0,
   "critical_contract_failures": 0,
@@ -14,7 +14,7 @@
       "metric_name"
     ]
   },
-  "freshness_minutes": 23.534035266666667,
+  "freshness_minutes": 24.199678516666665,
   "kb_text_length_signal": {
     "is_anomaly": false,
     "score": 0.8974279661016953,
