@@ -21,10 +21,11 @@ def test_known_event_false_does_not_raise_threshold():
 
 
 
-def test_zero_mad_small_float_noise_is_not_anomaly():
+def test_zero_mad_constant_baseline_and_deviation():
     history = [100.0] * 20
-    result = detect_metric(100.0001, history, method="mad")
-    assert result["is_anomaly"] is False
+    assert detect_metric(100.0, history, method="mad")["is_anomaly"] is False
+    assert detect_metric(150.0, history, method="mad")["is_anomaly"] is True
+
 
 
 def test_following_known_trend_is_normal():

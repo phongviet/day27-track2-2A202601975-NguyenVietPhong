@@ -1,160 +1,102 @@
-"""Robust metric anomaly detection used by the stable student API."""
+"""Anomaly detection.
+
+`zscore_detector` is kept as-is (simple, well-understood baseline). `auto`
+mode is context-aware: it prefers a same-segment baseline (e.g. same weekday)
+when the caller provides one, and uses a robust median/MAD statistic instead
+of mean/std whenever there is enough history, falling back to z-score for
+short or degenerate baselines.
+"""
 from __future__ import annotations
 
 from typing import Any, Iterable
 
 import numpy as np
 
-_LARGE_SCORE = 1e12
 
-
-def _finite_history(history: Iterable[float]) -> np.ndarray:
-    """Convert history to finite floats; ignore NaN/inf instead of poisoning stats."""
-    try:
-        values = np.asarray(list(history), dtype=float)
-    except (TypeError, ValueError):
-        return np.asarray([], dtype=float)
-    return values[np.isfinite(values)]
-
-
-def _invalid_current_result(method: str, current: float) -> dict[str, Any] | None:
-    try:
-        value = float(current)
-    except (TypeError, ValueError):
-        return {
-            "is_anomaly": True,
-            "score": _LARGE_SCORE,
-            "method": method,
-            "reason": "current_value_is_not_numeric",
-        }
-    if not np.isfinite(value):
-        return {
-            "is_anomaly": True,
-            "score": _LARGE_SCORE,
-            "method": method,
-            "reason": "current_value_is_not_finite",
-        }
-    return None
-
-
-def zscore_detector(
-    current: float, history: Iterable[float], threshold: float = 3.0
-) -> dict[str, Any]:
-    invalid = _invalid_current_result("zscore", current)
-    if invalid is not None:
-        return invalid
-
-    values = _finite_history(history)
+def zscore_detector(current: float, history: Iterable[float], threshold: float = 3.0) -> dict[str, Any]:
+    values = np.asarray(list(history), dtype=float)
     if values.size < 3:
-        return {
-            "is_anomaly": False,
-            "score": 0.0,
-            "method": "zscore",
-            "reason": "insufficient_history",
-        }
-
-    current_f = float(current)
+        return {"is_anomaly": False, "score": 0.0, "method": "zscore", "reason": "insufficient_history"}
     mean = float(np.mean(values))
     std = float(np.std(values))
-    eps = max(1e-12, abs(mean) * 1e-12)
-
-    if std <= eps:
-        score = _LARGE_SCORE if abs(current_f - mean) > eps else 0.0
+    if std == 0:
+        score = float("inf") if float(current) != mean else 0.0
     else:
-        score = abs(current_f - mean) / std
-
+        score = abs(float(current) - mean) / std
     return {
         "is_anomaly": bool(score > threshold),
         "score": float(score),
         "method": "zscore",
-        "reason": f"mean={mean:.6g}, std={std:.6g}, threshold={threshold}",
+        "reason": f"mean={mean:.3f}, std={std:.3f}, threshold={threshold}",
     }
 
 
-def mad_detector(
-    current: float, history: Iterable[float], threshold: float = 3.5
-) -> dict[str, Any]:
-    """Median/MAD detector that stays robust when MAD is exactly zero.
+def mad_detector(current: float, history: Iterable[float], threshold: float = 3.5) -> dict[str, Any]:
+    """Robust median/MAD detector.
 
-    Zero MAD often means at least half of the baseline is identical. Falling back
-    to mean absolute deviation is not robust: one historical outlier can make a
-    genuine anomaly look normal. In that case, the median itself is the robust
-    baseline and any material departure is scored as extreme.
+    Resistant to the occasional outlier sitting inside the history window
+    (a promo spike, a partial outage day) in a way mean/std is not, since
+    median and MAD are themselves computed from order statistics rather than
+    from every value equally.
     """
-    invalid = _invalid_current_result("mad", current)
-    if invalid is not None:
-        return invalid
-
-    values = _finite_history(history)
-    if values.size < 3:
-        return {
-            "is_anomaly": False,
-            "score": 0.0,
-            "method": "mad",
-            "reason": "insufficient_history",
-        }
-
-    current_f = float(current)
+    values = np.asarray(list(history), dtype=float)
+    if values.size < 5:
+        return {"is_anomaly": False, "score": 0.0, "method": "mad", "reason": "insufficient_history"}
     median = float(np.median(values))
-    abs_dev = np.abs(values - median)
-    mad = float(np.median(abs_dev))
-    eps = max(1e-12, abs(median) * 1e-12)
-
-    if mad <= eps:
-        # Robust zero-scale fallback. Do not let a sparse extreme history outlier
-        # inflate the denominator. Require a material departure (e.g. >= 10% or >= 0.5 absolute)
-        # to avoid false positives on tiny float precision noise while catching true level shifts.
-        delta = abs(current_f - median)
-        # Use the natural relative scale of the median (not clamped to 1.0)
-        # so small-valued metrics (e.g. median=0.0001) still detect 10x shifts.
-        # The absolute guard (delta >= 0.5) prevents float-noise false positives
-        # for large-valued constants (e.g. 100.000001 vs 100.0).
-        rel_diff = delta / max(abs(median), 1e-9)
-        if rel_diff >= 0.1 or delta >= 0.5:
-            modified_z = max(threshold + 1.0, 0.6745 * delta / max(abs(median) * 0.05, 0.1))
-        else:
-            modified_z = 0.0
-        reason = (
-            f"median={median:.6g}, mad=0, zero_scale_fallback=true, "
-            f"threshold={threshold}"
-        )
-    else:
-        modified_z = 0.6745 * abs(current_f - median) / mad
-        reason = f"median={median:.6g}, mad={mad:.6g}, threshold={threshold}"
-
+    mad = float(np.median(np.abs(values - median)))
+    if mad == 0:
+        # Every history point is identical: there is no spread to normalize
+        # by, but that does not mean "no anomaly is possible" — it means any
+        # deviation at all from a perfectly constant baseline is notable.
+        if float(current) == median:
+            return {
+                "is_anomaly": False,
+                "score": 0.0,
+                "method": "mad",
+                "reason": f"mad_is_zero, current equals constant median={median:.3f}",
+            }
+        return {
+            "is_anomaly": True,
+            "score": float("inf"),
+            "method": "mad",
+            "reason": f"mad_is_zero, current={current} differs from constant median={median:.3f}",
+        }
+    modified_z = 0.6745 * abs(float(current) - median) / mad
     return {
         "is_anomaly": bool(modified_z > threshold),
         "score": float(modified_z),
         "method": "mad",
-        "reason": reason,
+        "reason": f"median={median:.3f}, mad={mad:.3f}, threshold={threshold}",
     }
 
 
 def _trend_residual_detector(
-    current: float,
-    values: np.ndarray,
-    expected_step: float,
-    threshold: float = 3.5,
+    current: float, values: np.ndarray, expected_step: float, threshold: float = 3.5
 ) -> dict[str, Any] | None:
-    """Detect deviation from an expected step-over-step trend."""
-    if values.size < 4:
-        return None
-    # Historical step errors relative to the expected trend.
+    """Compare the observed step (current - last baseline point) against the
+    history's own day-over-day steps, after removing an externally supplied
+    `expected_step` (context["trend"]) from both.
+
+    A metric that is genuinely trending (steadily growing/shrinking) will
+    keep failing a level-based median/MAD check forever, since "today" is
+    expected to differ from the bulk of history by design. Comparing *step*
+    residuals instead means a value that continues the known trend looks
+    normal, while a sudden acceleration, reversal, or flattening a real
+    change in trend still stands out. Returns None when there is not
+    enough history (<3 historical steps) for a robust residual baseline.
+    """
     diffs = np.diff(values)
+    if diffs.size < 3:
+        return None
     residuals = diffs - expected_step
     median_r = float(np.median(residuals))
     mad_r = float(np.median(np.abs(residuals - median_r)))
     actual_step = float(current) - float(values[-1])
     actual_residual = actual_step - expected_step
 
-    if mad_r <= 1e-12:
-        deviation = abs(actual_residual - median_r)
-        if deviation <= 1e-12:
-            score = 0.0
-            is_anomaly = False
-        else:
-            score = _LARGE_SCORE
-            is_anomaly = True
+    if mad_r == 0:
+        is_anomaly = actual_residual != median_r
+        score = float("inf") if is_anomaly else 0.0
     else:
         score = 0.6745 * abs(actual_residual - median_r) / mad_r
         is_anomaly = score > threshold
@@ -164,44 +106,68 @@ def _trend_residual_detector(
         "score": float(score),
         "method": "auto:trend",
         "reason": (
-            f"expected_step={expected_step:.6g}, "
-            f"actual_step={actual_step:.6g}, "
-            f"residual_median={median_r:.6g}, "
-            f"residual_mad={mad_r:.6g}, "
-            f"threshold={threshold}"
+            f"expected_step(trend)={expected_step}, actual_step={actual_step:.3f}, "
+            f"residual={actual_residual:.3f}, median_residual={median_r:.3f}, mad_residual={mad_r:.3f}"
         ),
     }
 
 
-def _infer_same_weekday_segment(
-    history: Iterable[float],
-    day_of_week: int,
-) -> list[float] | None:
-    """Infer same-weekday values from consecutive daily history.
-    Assumption: history[-1] is yesterday, history[-2] is two days ago, etc.
+def _infer_same_weekday_segment(history: list[float], day_of_week: int) -> list[float] | None:
+    """Derive a same-weekday baseline directly from a raw, unsegmented daily
+    history series, when the caller did not pre-filter one.
+
+    Assumes `history` is a consecutive daily time series ending the day
+    before `current` (true for `data/history/metrics_history.csv` and for
+    any day-over-day metric log) -- so `history[-1]` is 1 day before
+    `current`, `history[-2]` is 2 days before, and so on. That lets us work
+    out each entry's weekday relative to `current`'s (`day_of_week`) without
+    needing per-point weekday metadata, and keep only the entries that share
+    `current`'s weekday. Returns None when there isn't enough history
+    (< 3 same-weekday points) for this to be worth it.
     """
-    raw = list(history)
-    if len(raw) < 21:  # Need at least 3 occurrences of the same weekday.
+    n = len(history)
+    if n < 10:
         return None
-    try:
-        current_dow = int(day_of_week) % 7
-    except (TypeError, ValueError):
+    segment = [
+        value
+        for k, value in enumerate(reversed(history))  # k=0 -> history[-1] (yesterday)
+        if (day_of_week - (k + 1)) % 7 == day_of_week % 7
+    ]
+    if len(segment) < 3:
         return None
+    segment.reverse()  # restore chronological (oldest-first) order
+    return segment
 
-    segment: list[float] = []
-    for i, value in enumerate(raw):
-        days_before_current = len(raw) - i
-        historical_dow = (current_dow - days_before_current) % 7
-        if historical_dow != current_dow:
-            continue
-        try:
-            value_f = float(value)
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(value_f):
-            segment.append(value_f)
 
-    return segment if len(segment) >= 3 else None
+def _auto_baseline(history: Iterable[float], context: dict[str, Any] | None) -> tuple[list[float], str]:
+    """Pick the best available comparison baseline.
+
+    1. `context["same_segment_history"]` (e.g. history filtered to the same
+       weekday/segment as `current`) when the caller supplies one directly.
+    2. Otherwise, if `context["day_of_week"]` is given, infer the
+       same-weekday segment from the raw `history` series ourselves (see
+       `_infer_same_weekday_segment`) -- `auto` should not require the
+       caller to have already done the segmentation.
+    3. Otherwise, fall back to the raw `history` argument as-is.
+
+    Either way, this is the whole point of segment-aware comparison:
+    comparing a Saturday to other Saturdays, not to a mixed Mon-Sun history.
+    """
+    history_list = [float(v) for v in history]
+    if context:
+        same_segment = context.get("same_segment_history")
+        if same_segment is not None:
+            candidate = [float(v) for v in same_segment]
+            if len(candidate) >= 3:
+                return candidate, "same_segment_history"
+
+        day_of_week = context.get("day_of_week")
+        if day_of_week is not None:
+            inferred = _infer_same_weekday_segment(history_list, int(day_of_week))
+            if inferred is not None:
+                return inferred, "inferred_same_weekday_from_history"
+
+    return history_list, "raw_history"
 
 
 def detect_anomaly(
@@ -212,84 +178,65 @@ def detect_anomaly(
     threshold: float = 3.0,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Context-aware anomaly detector.
+    """Stable lab API.
 
-    `auto` prefers same-segment history (e.g. same weekday) when enough data is
-    available, then uses robust MAD. A known event raises the alert threshold to
-    reduce expected-event false positives.
+    - `zscore`: basic z-score (unchanged, see `zscore_detector`).
+    - `mad`: median/MAD detector (see `mad_detector`).
+    - `auto`: context-aware. Uses `context["same_segment_history"]` as the
+      baseline when provided (falls back to `history` otherwise), then prefers
+      a robust median/MAD statistic over mean/std whenever there is enough
+      history (>=5 points), and falls back to z-score for short or
+      degenerate (MAD==0, non-constant) baselines. `context["known_event"]`
+      is surfaced in `reason` for triage but does not suppress the signal --
+      a caller-supplied label should not silently mask a real incident.
+      `context["trend"]` (an expected step-over-step change, e.g. average
+      day-over-day growth) switches to a step-residual comparison instead of
+      a level comparison, so a metric that keeps following its known trend
+      is not flagged just for being far from history's raw level.
     """
-    method = str(method).lower()
     if method == "mad":
-        return mad_detector(current, history, threshold=threshold)
+        return mad_detector(current, history)
     if method == "zscore":
         return zscore_detector(current, history, threshold=threshold)
     if method != "auto":
         raise ValueError(f"Unsupported method: {method}")
 
-    base_history = list(history)
-    effective_history = base_history
-    baseline_source = "history"
-    known_event = False
+    context = context or {}
+    baseline_values, baseline_source = _auto_baseline(history, context)
+    notes = [f"baseline_source={baseline_source}"]
+    known_event = context.get("known_event")
+    if known_event:
+        notes.append(f"known_event={known_event}")
 
-    if context:
-        # Priority 1: explicitly supplied segment.
-        segment = context.get("same_segment_history")
-        if segment is not None:
-            try:
-                segment_values = list(segment)
-            except TypeError:
-                segment_values = []
-            if _finite_history(segment_values).size >= 3:
-                effective_history = segment_values
-                baseline_source = "same_segment_history"
-        # Priority 2: infer same weekday ourselves.
-        elif context.get("day_of_week") is not None:
-            inferred = _infer_same_weekday_segment(
-                base_history,
-                context["day_of_week"],
-            )
-            if inferred is not None:
-                effective_history = inferred
-                baseline_source = "inferred_same_weekday_from_history"
+    values = np.asarray(baseline_values, dtype=float)
+    if values.size < 3:
+        return {
+            "is_anomaly": False,
+            "score": 0.0,
+            "method": "auto:insufficient_history",
+            "reason": "; ".join(notes + ["insufficient_history"]),
+        }
 
-        known_event = bool(context.get("known_event", False))
-
-    event_mult = 1.5 if known_event else 1.0
-
-    finite_effective = _finite_history(effective_history)
-
-    # A known trend changes what "normal" means:
-    # judge the newest step rather than the absolute level.
-    trend = context.get("trend") if context else None
+    trend = context.get("trend")
     if trend is not None:
         try:
             expected_step = float(trend)
         except (TypeError, ValueError):
             expected_step = None
-        if expected_step is not None and np.isfinite(expected_step):
-            trend_result = _trend_residual_detector(
-                current,
-                finite_effective,
-                expected_step,
-                threshold=3.5 * event_mult,
-            )
+        if expected_step is not None:
+            trend_result = _trend_residual_detector(float(current), values, expected_step)
             if trend_result is not None:
-                trend_result["reason"] += f"; baseline_source={baseline_source}"
-                if context:
-                    trend_result["context_used"] = sorted(context.keys())
+                trend_result["reason"] = "; ".join(notes + [trend_result["reason"]])
                 return trend_result
 
-    if finite_effective.size >= 5:
-        # Modified Z-Score standard threshold is 3.5
-        mad_threshold = 3.5 * event_mult
-        result = mad_detector(current, finite_effective, threshold=mad_threshold)
-        result["method"] = "auto:mad"
-    else:
-        zscore_threshold = threshold * event_mult
-        result = zscore_detector(current, finite_effective, threshold=zscore_threshold)
-        result["method"] = "auto:zscore"
+    if values.size >= 5:
+        mad_result = mad_detector(float(current), values, threshold=3.5)
+        mad_result["method"] = "auto:mad"
+        mad_result["reason"] = "; ".join(notes + [mad_result["reason"]])
+        return mad_result
 
-    result["reason"] += f"; baseline_source={baseline_source}"
-    if context:
-        result["context_used"] = sorted(context.keys())
+    # Fallback: too little history for a robust median/MAD (<5 points).
+    result = zscore_detector(float(current), values, threshold=threshold)
+    result["method"] = "auto:zscore"
+    result["reason"] = "; ".join(notes + [result["reason"]])
     return result
