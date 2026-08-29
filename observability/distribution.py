@@ -1,9 +1,58 @@
+"""Distribution drift detection without undeclared third-party dependencies."""
 from __future__ import annotations
 
+import math
 from typing import Any, Iterable
 
 import numpy as np
-from scipy.stats import ks_2samp
+
+
+def _finite(values: Iterable[float]) -> np.ndarray:
+    try:
+        arr = np.asarray(list(values), dtype=float)
+    except (TypeError, ValueError):
+        return np.asarray([], dtype=float)
+    return arr[np.isfinite(arr)]
+
+
+def _ks_statistic(a: np.ndarray, b: np.ndarray) -> float:
+    """Exact empirical two-sample KS D statistic (NumPy only)."""
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    points = np.sort(np.unique(np.concatenate([a, b])))
+    a_sorted = np.sort(a)
+    b_sorted = np.sort(b)
+    cdf_a = np.searchsorted(a_sorted, points, side="right") / a.size
+    cdf_b = np.searchsorted(b_sorted, points, side="right") / b.size
+    return float(np.max(np.abs(cdf_a - cdf_b)))
+
+
+def _ks_pvalue_asymptotic(d: float, n: int, m: int) -> float:
+    """Useful deterministic approximation; anomaly decision also uses effect size."""
+    if d <= 0.0 or n <= 0 or m <= 0:
+        return 1.0
+    en = math.sqrt(n * m / (n + m))
+    if en <= 0:
+        return 1.0
+    lam = (en + 0.12 + 0.11 / en) * d
+    total = 0.0
+    for k in range(1, 101):
+        term = 2.0 * ((-1.0) ** (k - 1)) * math.exp(-2.0 * (k * lam) ** 2)
+        total += term
+        if abs(term) < 1e-12:
+            break
+    return float(min(1.0, max(0.0, total)))
+
+
+def _symmetric_ratio(a: float, b: float, *, eps: float = 1e-12) -> float:
+    aa, bb = abs(float(a)), abs(float(b))
+    if aa <= eps and bb <= eps:
+        return 1.0
+    lo = min(aa, bb)
+    hi = max(aa, bb)
+    if lo <= eps:
+        return float("inf")
+    return hi / lo
 
 
 def detect_distribution_shift(
@@ -13,38 +62,67 @@ def detect_distribution_shift(
     alpha: float = 0.01,
     ratio_threshold: float = 3.0,
 ) -> dict[str, Any]:
-    """Robust distribution shift detector combining Kolmogorov-Smirnov test and mean ratio."""
-    cur = np.asarray(list(current_values), dtype=float)
-    base = np.asarray(list(baseline_values), dtype=float)
+    """Detect location, scale, or CDF shift.
+
+    Combines:
+    - symmetric mean-ratio for obvious volume/level changes,
+    - robust/standard scale ratio to catch same-mean shape changes,
+    - two-sample KS with a practical D threshold to avoid p-value-only alerts.
+    """
+    cur = _finite(current_values)
+    base = _finite(baseline_values)
     if cur.size == 0 or base.size == 0:
-        return {"is_anomaly": False, "score": 0.0, "method": "ks_and_mean_ratio", "reason": "empty_input"}
+        return {
+            "is_anomaly": False,
+            "score": 0.0,
+            "method": "ks_location_scale",
+            "reason": "empty_or_nonfinite_input",
+        }
 
     cur_mean = float(np.mean(cur))
     base_mean = float(np.mean(base))
-    if base_mean == 0:
-        mean_ratio = float("inf") if cur_mean != 0 else 1.0
-    else:
-        mean_ratio = max(abs(cur_mean / base_mean), abs(base_mean / cur_mean)) if cur_mean != 0 else float("inf")
+    mean_ratio = _symmetric_ratio(cur_mean, base_mean)
 
-    # Run two-sample Kolmogorov-Smirnov test if enough samples
-    if cur.size >= 3 and base.size >= 3:
-        ks_res = ks_2samp(cur, base)
-        ks_stat = float(ks_res.statistic)
-        p_value = float(ks_res.pvalue)
-    else:
-        ks_stat = 0.0
-        p_value = 1.0
+    cur_std = float(np.std(cur))
+    base_std = float(np.std(base))
+    scale_ratio = _symmetric_ratio(cur_std, base_std)
 
-    is_anomaly = bool(mean_ratio >= ratio_threshold or p_value < 0.05)
-    score = float(mean_ratio if not np.isinf(mean_ratio) else 999.0)
+    ks_stat = _ks_statistic(cur, base)
+    p_value = _ks_pvalue_asymptotic(ks_stat, int(cur.size), int(base.size))
 
+    # Require practical CDF separation as well as significance. D=0.25 is large
+    # enough to avoid flagging tiny differences in large samples, but catches
+    # strong shape changes with identical means.
+    ks_practical_threshold = 0.25
+    ks_alert = (
+        cur.size >= 4
+        and base.size >= 4
+        and p_value < alpha
+        and ks_stat >= ks_practical_threshold
+    )
+
+    mean_alert = bool(mean_ratio >= ratio_threshold)
+    scale_alert = bool(scale_ratio >= ratio_threshold)
+    is_anomaly = bool(mean_alert or scale_alert or ks_alert)
+
+    finite_scores = [
+        (mean_ratio / ratio_threshold) if np.isfinite(mean_ratio) else 1e12,
+        (scale_ratio / ratio_threshold) if np.isfinite(scale_ratio) else 1e12,
+        ks_stat / ks_practical_threshold,
+    ]
+    score = float(max(finite_scores))
 
     return {
         "is_anomaly": is_anomaly,
         "score": score,
-        "ks_stat": ks_stat,
-        "p_value": p_value,
-        "method": "ks_and_mean_ratio",
-        "reason": f"baseline_mean={base_mean:.3f}, current_mean={cur_mean:.3f}, ks_stat={ks_stat:.3f}, p_val={p_value:.4f}",
+        "ks_stat": float(ks_stat),
+        "p_value": float(p_value),
+        "mean_ratio": float(mean_ratio) if np.isfinite(mean_ratio) else 1e12,
+        "scale_ratio": float(scale_ratio) if np.isfinite(scale_ratio) else 1e12,
+        "method": "ks_location_scale",
+        "reason": (
+            f"baseline_mean={base_mean:.6g}, current_mean={cur_mean:.6g}, "
+            f"mean_ratio={mean_ratio:.6g}, scale_ratio={scale_ratio:.6g}, "
+            f"ks_stat={ks_stat:.4f}, p_value={p_value:.4g}"
+        ),
     }
-

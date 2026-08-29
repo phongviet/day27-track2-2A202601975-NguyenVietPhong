@@ -1,21 +1,14 @@
-"""Simple contract validator used as the starter baseline.
+"""Deterministic data-contract validation for the lab stable API."""
+from __future__ import annotations
 
-The implementation intentionally covers only common deterministic checks.
-Students are expected to extend it with:
-- stronger type validation/coercion rules,
-- freshness checks,
-- cross-field/cross-table assertions,
-- severity-aware actions (block/quarantine/warn),
-- richer observability metadata.
-"""
-from datetime import datetime
+from datetime import date, datetime
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import yaml
-
 
 
 def _issue(
@@ -37,15 +30,74 @@ def _issue(
 
 def load_contract(path: str | Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        payload = yaml.safe_load(f)
+    return payload or {}
+
+
+def _is_integer_value(value: Any) -> bool:
+    # Reject strings and bools, but allow integer-valued numeric scalars such as
+    # numpy.int64 and 1.0. This is semantic integer validation, not coercion.
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        return False
+    if isinstance(value, Real):
+        v = float(value)
+        return np.isfinite(v) and v.is_integer()
+    return False
+
+
+def _is_number_value(value: Any) -> bool:
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        return False
+    if isinstance(value, Real):
+        return bool(np.isfinite(float(value)))
+    return False
+
+
+def _is_datetime_value(value: Any) -> bool:
+    # Public fixtures use ISO-8601 strings although the contract says datetime,
+    # so accept parseable ISO timestamps while still rejecting arbitrary strings.
+    if isinstance(value, (pd.Timestamp, datetime, date, np.datetime64)):
+        return not pd.isna(value)
+    if isinstance(value, str):
+        try:
+            parsed = pd.to_datetime(value, utc=True, errors="raise")
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return not pd.isna(parsed)
+    return False
+
+
+def _validate_type(series: pd.Series, expected_type: str) -> bool:
+    non_null = series.dropna()
+    if non_null.empty:
+        return True
+
+    expected = str(expected_type).lower()
+    if expected in {"integer", "int"}:
+        return bool(non_null.map(_is_integer_value).all())
+    if expected in {"number", "float", "numeric"}:
+        return bool(non_null.map(_is_number_value).all())
+    if expected in {"datetime", "timestamp"}:
+        return bool(non_null.map(_is_datetime_value).all())
+    if expected in {"string", "str", "text"}:
+        return bool(non_null.map(lambda x: isinstance(x, str)).all())
+    if expected in {"boolean", "bool"}:
+        return bool(non_null.map(lambda x: isinstance(x, (bool, np.bool_))).all())
+
+    # Unknown contract type is a contract/configuration error, not silently valid.
+    return False
 
 
 def validate_dataframe(df: pd.DataFrame, contract: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+
     issues: list[dict[str, Any]] = []
     columns = contract.get("columns") or contract.get("fields") or {}
 
     for column, rules in columns.items():
-        severity = rules.get("severity", "warning")
+        rules = rules or {}
+        severity = str(rules.get("severity", "warning")).lower()
         required = bool(rules.get("required", False))
 
         if column not in df.columns:
@@ -76,7 +128,8 @@ def validate_dataframe(df: pd.DataFrame, contract: dict[str, Any]) -> list[dict[
             )
 
         if rules.get("unique"):
-            duplicate_count = int(series.duplicated(keep=False).sum())
+            non_null = series.dropna()
+            duplicate_count = int(non_null.duplicated(keep=False).sum())
             issues.append(
                 _issue(
                     "unique",
@@ -103,59 +156,22 @@ def validate_dataframe(df: pd.DataFrame, contract: dict[str, Any]) -> list[dict[
 
         expected_type = rules.get("type")
         if expected_type:
-            non_null = series.dropna()
-            type_valid = True
-            if len(non_null) > 0:
-                if expected_type in ("integer", "int"):
-                    def _is_int(x: Any) -> bool:
-                        if isinstance(x, (bool, np.bool_)):
-                            return False
-                        if isinstance(x, (int, np.integer)):
-                            return True
-                        if isinstance(x, (float, np.floating)):
-                            return float(x).is_integer()
-                        return False
-                    type_valid = non_null.apply(_is_int).all()
-                elif expected_type in ("number", "float", "numeric"):
-                    def _is_num(x: Any) -> bool:
-                        if isinstance(x, (bool, np.bool_)):
-                            return False
-                        if isinstance(x, (int, float, np.number)):
-                            return True
-                        return False
-                    type_valid = non_null.apply(_is_num).all()
-                elif expected_type in ("datetime", "timestamp"):
-                    def _is_dt(x: Any) -> bool:
-                        if isinstance(x, (pd.Timestamp, datetime)):
-                            return True
-                        if isinstance(x, str):
-                            try:
-                                pd.to_datetime(x)
-                                return True
-                            except Exception:
-                                return False
-                        return False
-                    type_valid = non_null.apply(_is_dt).all()
-                elif expected_type in ("string", "str", "text"):
-                    type_valid = non_null.apply(lambda x: isinstance(x, str)).all()
-                elif expected_type in ("boolean", "bool"):
-                    type_valid = non_null.apply(
-                        lambda x: isinstance(x, (bool, np.bool_))
-                    ).all()
-
+            type_valid = _validate_type(series, str(expected_type))
             issues.append(
                 _issue(
                     "type",
                     column=column,
                     severity=severity,
-                    passed=bool(type_valid),
+                    passed=type_valid,
                     details=f"expected_type={expected_type}; type_valid={type_valid}",
                 )
             )
 
         if "min" in rules or "max" in rules:
             numeric = pd.to_numeric(series, errors="coerce")
-            invalid = pd.Series(False, index=series.index)
+            # Non-null values that cannot be interpreted numerically are invalid
+            # for the range check too (type check independently catches drift).
+            invalid = series.notna() & numeric.isna()
             if "min" in rules:
                 invalid |= numeric < rules["min"]
             if "max" in rules:
@@ -193,25 +209,14 @@ def validate_dataframe(df: pd.DataFrame, contract: dict[str, Any]) -> list[dict[
     freshness = contract.get("freshness")
     if freshness and isinstance(freshness, dict):
         fresh_col = freshness.get("column")
-        max_delay = freshness.get("max_delay_minutes", 60)
-        fresh_sev = freshness.get("severity", "warning")
+        max_delay = float(freshness.get("max_delay_minutes", 60))
+        fresh_sev = str(freshness.get("severity", "warning")).lower()
+
         if fresh_col and fresh_col in df.columns:
-            parsed_dates = pd.to_datetime(df[fresh_col], utc=True, errors="coerce").dropna()
-            if len(parsed_dates) > 0:
-                latest = parsed_dates.max()
-                now = pd.Timestamp.now(tz="UTC")
-                delay_minutes = max(0.0, (now - latest).total_seconds() / 60.0)
-                passed = delay_minutes <= max_delay
-                issues.append(
-                    _issue(
-                        "freshness",
-                        column=fresh_col,
-                        severity=fresh_sev,
-                        passed=bool(passed),
-                        details=f"delay_minutes={delay_minutes:.1f}; max_delay_minutes={max_delay}",
-                    )
-                )
-            else:
+            parsed_all = pd.to_datetime(df[fresh_col], utc=True, errors="coerce")
+            parsed_dates = parsed_all.dropna()
+
+            if parsed_dates.empty:
                 issues.append(
                     _issue(
                         "freshness",
@@ -219,6 +224,31 @@ def validate_dataframe(df: pd.DataFrame, contract: dict[str, Any]) -> list[dict[
                         severity=fresh_sev,
                         passed=False,
                         details=f"No valid datetime values in freshness column '{fresh_col}'",
+                    )
+                )
+            else:
+                latest = parsed_dates.max()
+                now = pd.Timestamp.now(tz="UTC")
+                delay_minutes = (now - latest).total_seconds() / 60.0
+
+                # Very-future timestamps are not "fresh"; they indicate clock/data
+                # corruption. A 5-minute tolerance avoids tiny clock skew.
+                future_tolerance = float(freshness.get("future_tolerance_minutes", 5))
+                too_far_future = delay_minutes < -future_tolerance
+                too_old = delay_minutes > max_delay
+                passed = not (too_old or too_far_future)
+
+                issues.append(
+                    _issue(
+                        "freshness",
+                        column=fresh_col,
+                        severity=fresh_sev,
+                        passed=passed,
+                        details=(
+                            f"delay_minutes={delay_minutes:.1f}; "
+                            f"max_delay_minutes={max_delay:g}; "
+                            f"future_tolerance_minutes={future_tolerance:g}"
+                        ),
                     )
                 )
         elif fresh_col:
@@ -235,10 +265,20 @@ def validate_dataframe(df: pd.DataFrame, contract: dict[str, Any]) -> list[dict[
     return issues
 
 
-def failed_issues(issues: list[dict[str, Any]], min_severity: str | None = None) -> list[dict[str, Any]]:
+def failed_issues(
+    issues: list[dict[str, Any]], min_severity: str | None = None
+) -> list[dict[str, Any]]:
     failed = [i for i in issues if not i.get("passed", False)]
     if min_severity is None:
         return failed
+
     order = {"info": 0, "warning": 1, "critical": 2}
-    threshold = order[min_severity]
-    return [i for i in failed if order.get(i.get("severity", "warning"), 1) >= threshold]
+    key = str(min_severity).lower()
+    if key not in order:
+        raise ValueError(f"Unknown severity: {min_severity}")
+    threshold = order[key]
+    return [
+        i
+        for i in failed
+        if order.get(str(i.get("severity", "warning")).lower(), 1) >= threshold
+    ]
