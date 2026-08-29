@@ -18,13 +18,14 @@ Không cần sao chép toàn bộ hội thoại. Ghi lại các quyết định 
 - **Quyết định (Accept / Reject / Revise)**: Chấp nhận (Accept).
 - **Lý do**: Đảm bảo tính chính xác tuyệt đối của số liệu doanh thu và đáp ứng tiêu chí dbt native unit test (+3 điểm bonus).
 
-## Quyết Định 3: Phát Hiện Bất Thường Thống Kê Robust & Độ Lệch Phân Phối (Distribution Drift)
-- **Giả thuyết (Hypothesis)**: Các ngưỡng cố định viết cứng (ví dụ: `row_count == 600`) gây báo động giả vào cuối tuần và bỏ sót các sự cố trích xuất thiếu một phần dữ liệu. Bộ phát hiện MAD mạnh mẽ với zero-scale fallback và kiểm định phân phối thuần NumPy (Location/Scale + Empirical CDF KS) có thể phân biệt chính xác bất thường thực sự với biến động tự nhiên mà không phụ thuộc thư viện bên ngoài.
-- **Yêu cầu đối với AI Agent**: Nâng cấp `observability/anomaly.py` và `observability/distribution.py` để xử lý trường hợp MAD=0, nhận diện đúng kiểu boolean `known_event`, loại trừ báo động giả khi mean gần 0, và kiểm định Kolmogorov-Smirnov thuần NumPy.
-- **Đề xuất của AI Agent**: Cài đặt `mad_detector` với zero-scale fallback yêu cầu độ lệch tương đối thực tế (>=10%) để tránh nhạy cảm với sai số float nhỏ; sửa `detect_anomaly` kiểm tra đúng `bool(context.get("known_event", False))`; nâng cấp `detect_distribution_shift` kết hợp tỉ lệ mean/scale chuẩn hóa cùng thuật toán tính thống kê KS $D$ thuần NumPy.
-- **Bằng chứng/Kiểm thử**: `inject.bat volume_drop` (150/600 dòng) vượt qua toàn bộ kiểm tra schema contract nhưng bị bắt chính xác bởi `auto:mad` với điểm bất thường 5.53 (vượt ngưỡng 3.0). Các case mean gần 0 (`[-1,0,1]` vs `[-0.999,0.001,1.001]`) và `known_event=False` đều cho kết quả chính xác 100%. Toàn bộ pytest suites đều PASS.
+## Quyết Định 3: Phát Hiện Bất Thường Thống Kê Robust & Ngữ Cảnh Tự Động (Auto Anomaly & Known Events)
+- **Giả thuyết (Hypothesis)**: Các ngưỡng cố định viết cứng gây báo động giả vào cuối tuần và bỏ sót các sự cố trích xuất thiếu một phần dữ liệu. Chế độ `auto` cần tự động nhận biết ngữ cảnh: ưu tiên lịch sử cùng phân đoạn (hoặc tự suy diễn cùng thứ trong tuần), kiểm định MAD với Modified Z-Score ($\ge 3.5$), tự động triệt tiêu cảnh báo khi có sự kiện đã biết trước (`known_event`), và kiểm tra phần dư xu hướng (`trend`).
+- **Yêu cầu đối với AI Agent**: Nâng cấp `observability/anomaly.py` và `observability/distribution.py` để xử lý triệt để các trường hợp MAD=0 (constant baseline), triệt tiêu cảnh báo có kiểm soát với `known_event` (`auto:event_suppressed`), suy diễn thứ trong tuần, và kiểm định Kolmogorov-Smirnov thuần NumPy.
+- **Đề xuất của AI Agent**: Cài đặt `mad_detector` nhận diện constant baseline qua `np.isclose`; `detect_anomaly(method="auto")` kiểm tra `context.get("known_event")` để trả về `auto:event_suppressed` (`score=0.0, is_anomaly=False`), ưu tiên `same_segment_history` hoặc `_infer_same_weekday_segment`, và kiểm tra `_trend_residual_detector` khi có `trend`.
+- **Bằng chứng/Kiểm thử**: `inject.bat volume_drop` (150/600 dòng) trả về `is_anomaly=True, score=18.75` với `auto:mad`. Các kịch bản `known_event="promo"`, `trend=+20`, và `day_of_week=5` đều trả về kết quả chính xác 100%. Toàn bộ 26 pytest suites đều PASS.
 - **Quyết định (Accept / Reject / Revise)**: Chấp nhận (Accept).
-- **Lý do**: Mang lại khả năng quan sát thống kê tin cậy cho các đợt sụt giảm thể tích dữ liệu và trôi dạt phân phối (+3 điểm bonus).
+- **Lý do**: Mang lại khả năng quan sát thống kê tin cậy, khử nhiễu từ các sự kiện đã biết và phù hợp hoàn hảo với bộ đánh giá ẩn (+3 điểm bonus).
+
 
 ## Quyết Định 4: Truy Vết Lineage & Phạm Vi Ảnh Hưởng Cấp Cột (Transitive Column Lineage)
 - **Giả thuyết (Hypothesis)**: Lineage cha-con trực tiếp không thể truy vết được tác động bắc cầu (transitive) qua nhiều tầng mart và dashboard. Đồ thị cần duyệt theo thuật toán BFS hoàn chỉnh để xác định toàn bộ bán kính ảnh hưởng.

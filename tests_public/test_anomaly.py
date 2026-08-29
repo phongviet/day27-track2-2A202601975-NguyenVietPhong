@@ -20,6 +20,14 @@ def test_known_event_false_does_not_raise_threshold():
     assert result["is_anomaly"] is True
 
 
+def test_known_event_truthy_suppresses_anomaly():
+    history = [100.0, 102.0, 98.0, 101.0, 99.0, 100.0, 101.0]
+    result = detect_metric(80.0, history, method="auto", context={"known_event": "promo"})
+    assert result["is_anomaly"] is False
+    assert result["method"] == "auto:event_suppressed"
+
+
+
 
 def test_zero_mad_constant_baseline_and_deviation():
     history = [100.0] * 20
