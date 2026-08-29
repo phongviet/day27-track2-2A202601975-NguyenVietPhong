@@ -8,13 +8,14 @@ Students are expected to extend it with:
 - severity-aware actions (block/quarantine/warn),
 - richer observability metadata.
 """
-from __future__ import annotations
-
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import yaml
+
 
 
 def _issue(
@@ -106,19 +107,40 @@ def validate_dataframe(df: pd.DataFrame, contract: dict[str, Any]) -> list[dict[
             type_valid = True
             if len(non_null) > 0:
                 if expected_type in ("integer", "int"):
-                    coerced = pd.to_numeric(non_null, errors="coerce")
-                    type_valid = coerced.notna().all() and (coerced % 1 == 0).all()
+                    def _is_int(x: Any) -> bool:
+                        if isinstance(x, (bool, np.bool_)):
+                            return False
+                        if isinstance(x, (int, np.integer)):
+                            return True
+                        if isinstance(x, (float, np.floating)):
+                            return float(x).is_integer()
+                        return False
+                    type_valid = non_null.apply(_is_int).all()
                 elif expected_type in ("number", "float", "numeric"):
-                    coerced = pd.to_numeric(non_null, errors="coerce")
-                    type_valid = coerced.notna().all()
+                    def _is_num(x: Any) -> bool:
+                        if isinstance(x, (bool, np.bool_)):
+                            return False
+                        if isinstance(x, (int, float, np.number)):
+                            return True
+                        return False
+                    type_valid = non_null.apply(_is_num).all()
                 elif expected_type in ("datetime", "timestamp"):
-                    coerced = pd.to_datetime(non_null, errors="coerce", utc=True)
-                    type_valid = coerced.notna().all()
+                    def _is_dt(x: Any) -> bool:
+                        if isinstance(x, (pd.Timestamp, datetime)):
+                            return True
+                        if isinstance(x, str):
+                            try:
+                                pd.to_datetime(x)
+                                return True
+                            except Exception:
+                                return False
+                        return False
+                    type_valid = non_null.apply(_is_dt).all()
                 elif expected_type in ("string", "str", "text"):
                     type_valid = non_null.apply(lambda x: isinstance(x, str)).all()
                 elif expected_type in ("boolean", "bool"):
                     type_valid = non_null.apply(
-                        lambda x: isinstance(x, (bool, bool)) or str(x).lower() in ("true", "false", "0", "1")
+                        lambda x: isinstance(x, (bool, np.bool_))
                     ).all()
 
             issues.append(

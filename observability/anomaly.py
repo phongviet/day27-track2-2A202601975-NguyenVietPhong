@@ -35,15 +35,25 @@ def mad_detector(current: float, history: Iterable[float], threshold: float = 3.
         return {"is_anomaly": False, "score": 0.0, "method": "mad", "reason": "insufficient_history"}
     median = float(np.median(values))
     mad = float(np.median(np.abs(values - median)))
+    diff = abs(float(current) - median)
+
     if mad == 0:
-        # Fallback to mean absolute deviation or direct equality check
-        mean_ad = float(np.mean(np.abs(values - median)))
-        if mean_ad > 0:
-            modified_z = 0.6745 * abs(float(current) - median) / mean_ad
+        # If median absolute deviation is zero (e.g. constant history or single outlier)
+        # Check non-zero differences excluding extreme outliers
+        non_zero_diffs = np.abs(values - median)[np.abs(values - median) > 0]
+        if non_zero_diffs.size > 0:
+            scale = float(np.median(non_zero_diffs))
+            modified_z = 0.6745 * diff / scale
         else:
-            modified_z = float("inf") if float(current) != median else 0.0
+            # Entire history is identical
+            scale = max(abs(median) * 0.1, 1.0)
+            modified_z = 0.6745 * diff / scale if diff > 0 else 0.0
+
+        # If there is a significant percentage deviation from constant median (> 20%)
+        if diff / max(abs(median), 1.0) >= 0.2:
+            modified_z = max(modified_z, threshold + 1.0)
     else:
-        modified_z = 0.6745 * abs(float(current) - median) / mad
+        modified_z = 0.6745 * diff / mad
 
     return {
         "is_anomaly": bool(modified_z > threshold),
@@ -51,6 +61,7 @@ def mad_detector(current: float, history: Iterable[float], threshold: float = 3.
         "method": "mad",
         "reason": f"median={median:.3f}, mad={mad:.3f}, threshold={threshold}",
     }
+
 
 
 def detect_anomaly(

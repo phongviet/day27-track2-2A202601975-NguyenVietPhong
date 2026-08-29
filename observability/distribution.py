@@ -35,8 +35,9 @@ def detect_distribution_shift(
         ks_stat = 0.0
         p_value = 1.0
 
-    is_anomaly = bool(mean_ratio >= ratio_threshold or (p_value < alpha and ks_stat > 0.4))
+    is_anomaly = bool(mean_ratio >= ratio_threshold or p_value < 0.05)
     score = float(mean_ratio if not np.isinf(mean_ratio) else 999.0)
+
 
     return {
         "is_anomaly": is_anomaly,
