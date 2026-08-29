@@ -42,7 +42,9 @@ Không cần sao chép toàn bộ hội thoại. Ghi lại các quyết định 
 - **Bằng chứng/Kiểm thử**: `test_multiwindow_sustained_fast_burn_pages` xác nhận `page=True, severity="critical"`; `test_multiwindow_transient_spike_does_not_page` xác nhận `page=False, severity="warning"`. Toàn bộ test SLO và RAG đều PASS.
 - **Quyết định (Accept / Reject / Revise)**: Chấp nhận (Accept).
 - **Lý do**: Tuân thủ tiêu chuẩn vận hành tin cậy Google SRE, chống mỏi cảnh báo (alert fatigue), và quan sát trôi dạt embedding (+7 điểm bonus).
+
 ## Quyết Định 6: Nhận Diện Xu Hướng Bước Tăng Dự Kiến (Expected Step-over-Step Trend Anomaly)
+
 - **Giả thuyết (Hypothesis)**: Khi metric có xu hướng tăng/giảm dự kiến liên tục (ví dụ: `row_count` tăng đều +20 dòng mỗi batch), việc so sánh với giá trị tuyệt đối trong lịch sử sẽ coi bước tăng hợp lệ là bất thường (level shift). Khi `context["trend"]` được cung cấp, bộ phát hiện cần đánh giá phần dư của bước tăng thực tế so với bước tăng dự kiến (`actual_step - expected_step`) thay vì giá trị mức tuyệt đối.
 - **Yêu cầu đối với AI Agent**: Bổ sung hàm `_trend_residual_detector` vào `observability/anomaly.py` và kích hoạt ưu tiên trong chế độ `method="auto"` khi tồn tại `context["trend"]`.
 - **Đề xuất của AI Agent**: Cài đặt `_trend_residual_detector` tính toán `diffs = np.diff(values)` và `residuals = diffs - expected_step`, áp dụng kiểm định MAD trên chuỗi phần dư với ngưỡng chuẩn $3.5 \times \text{event\_mult}$. Tích hợp vào `detect_anomaly` để tự động chuyển sang `auto:trend` khi `context.get("trend")` hợp lệ và lịch sử có từ 4 điểm trở lên.
