@@ -173,6 +173,37 @@ def _trend_residual_detector(
     }
 
 
+def _infer_same_weekday_segment(
+    history: Iterable[float],
+    day_of_week: int,
+) -> list[float] | None:
+    """Infer same-weekday values from consecutive daily history.
+    Assumption: history[-1] is yesterday, history[-2] is two days ago, etc.
+    """
+    raw = list(history)
+    if len(raw) < 21:  # Need at least 3 occurrences of the same weekday.
+        return None
+    try:
+        current_dow = int(day_of_week) % 7
+    except (TypeError, ValueError):
+        return None
+
+    segment: list[float] = []
+    for i, value in enumerate(raw):
+        days_before_current = len(raw) - i
+        historical_dow = (current_dow - days_before_current) % 7
+        if historical_dow != current_dow:
+            continue
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value_f):
+            segment.append(value_f)
+
+    return segment if len(segment) >= 3 else None
+
+
 def detect_anomaly(
     current: float,
     history: Iterable[float],
@@ -201,6 +232,7 @@ def detect_anomaly(
     known_event = False
 
     if context:
+        # Priority 1: explicitly supplied segment.
         segment = context.get("same_segment_history")
         if segment is not None:
             try:
@@ -210,6 +242,15 @@ def detect_anomaly(
             if _finite_history(segment_values).size >= 3:
                 effective_history = segment_values
                 baseline_source = "same_segment_history"
+        # Priority 2: infer same weekday ourselves.
+        elif context.get("day_of_week") is not None:
+            inferred = _infer_same_weekday_segment(
+                base_history,
+                context["day_of_week"],
+            )
+            if inferred is not None:
+                effective_history = inferred
+                baseline_source = "inferred_same_weekday_from_history"
 
         known_event = bool(context.get("known_event", False))
 

@@ -77,3 +77,56 @@ def test_flattening_known_trend_is_anomaly():
     assert result["method"] == "auto:trend"
 
 
+def test_auto_infers_same_weekday_from_raw_history():
+    current_dow = 5  # Saturday
+    n_days = 21
+    weekday_scale = 600
+    weekend_scale = 258
+    noise = [-6, 4, -2, 7]
+    history = []
+    for i in range(n_days):
+        days_before_current = n_days - i
+        dow = (current_dow - days_before_current) % 7
+        base = weekday_scale if dow < 5 else weekend_scale
+        history.append(base + noise[i % len(noise)])
+
+    result = detect_metric(
+        260,
+        history,
+        method="auto",
+        context={
+            "metric_name": "row_count",
+            "day_of_week": current_dow,
+        },
+    )
+    assert result["is_anomaly"] is False
+    assert "inferred_same_weekday" in result["reason"]
+
+
+def test_auto_detects_bad_value_against_inferred_weekday():
+    current_dow = 5  # Saturday
+    n_days = 21
+    weekday_scale = 600
+    weekend_scale = 258
+    noise = [-6, 4, -2, 7]
+    history = []
+    for i in range(n_days):
+        days_before_current = n_days - i
+        dow = (current_dow - days_before_current) % 7
+        base = weekday_scale if dow < 5 else weekend_scale
+        history.append(base + noise[i % len(noise)])
+
+    result = detect_metric(
+        600,
+        history,
+        method="auto",
+        context={
+            "metric_name": "row_count",
+            "day_of_week": current_dow,
+        },
+    )
+    assert result["is_anomaly"] is True
+    assert "inferred_same_weekday" in result["reason"]
+
+
+
