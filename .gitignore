@@ -10,3 +10,4 @@ dbt_project/dbt_packages/
 dbt_project/.user.yml
 .user.yml
 *.zip
+tests_custom/
