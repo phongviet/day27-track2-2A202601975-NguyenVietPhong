@@ -9,3 +9,4 @@ dbt_project/dbt_packages/
 .streamlit/
 dbt_project/.user.yml
 .user.yml
+*.zip
