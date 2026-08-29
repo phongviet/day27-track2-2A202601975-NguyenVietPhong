@@ -29,18 +29,22 @@ def zscore_detector(current: float, history: Iterable[float], threshold: float =
 
 
 def mad_detector(current: float, history: Iterable[float], threshold: float = 3.5) -> dict[str, Any]:
-    """Robust example, intentionally incomplete around zero-MAD edge cases.
-
-    Students may improve this function and/or use it from auto mode.
-    """
+    """Robust MAD detector handling zero-MAD and constant histories gracefully."""
     values = np.asarray(list(history), dtype=float)
-    if values.size < 5:
+    if values.size < 3:
         return {"is_anomaly": False, "score": 0.0, "method": "mad", "reason": "insufficient_history"}
     median = float(np.median(values))
     mad = float(np.median(np.abs(values - median)))
     if mad == 0:
-        return {"is_anomaly": False, "score": 0.0, "method": "mad", "reason": "mad_is_zero_todo"}
-    modified_z = 0.6745 * abs(float(current) - median) / mad
+        # Fallback to mean absolute deviation or direct equality check
+        mean_ad = float(np.mean(np.abs(values - median)))
+        if mean_ad > 0:
+            modified_z = 0.6745 * abs(float(current) - median) / mean_ad
+        else:
+            modified_z = float("inf") if float(current) != median else 0.0
+    else:
+        modified_z = 0.6745 * abs(float(current) - median) / mad
+
     return {
         "is_anomaly": bool(modified_z > threshold),
         "score": float(modified_z),
@@ -57,24 +61,31 @@ def detect_anomaly(
     threshold: float = 3.0,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Stable lab API.
-
-    Current starter behavior:
-    - `zscore`: basic z-score.
-    - `mad`: MAD example.
-    - `auto`: still uses naive z-score and ignores context.
-
-    TODO(student): make `auto` context-aware. Useful context keys used by the
-    instructor may include `day_of_week`, `same_segment_history`,
-    `metric_name`, `known_event`, and `trend`.
-    """
+    """Context-aware anomaly detector supporting seasonality, robust MAD, and z-score."""
     if method == "mad":
-        return mad_detector(current, history)
-    if method in {"zscore", "auto"}:
-        result = zscore_detector(current, history, threshold=threshold)
-        if method == "auto":
-            result["method"] = "auto:zscore"
-            if context:
-                result["reason"] += "; context_ignored_by_starter=true"
-        return result
+        return mad_detector(current, history, threshold=threshold)
+    if method == "zscore":
+        return zscore_detector(current, history, threshold=threshold)
+    if method == "auto":
+        # Check context for segment history (e.g. same day of week)
+        eff_history = list(history)
+        if context:
+            if "same_segment_history" in context and len(context["same_segment_history"]) >= 3:
+                eff_history = list(context["same_segment_history"])
+            elif "known_event" in context and context["known_event"] is not None:
+                # Known promotion or scheduled maintenance adjusts threshold
+                threshold = threshold * 1.5
+
+        # Choose robust MAD if sufficient samples, else Z-score
+        if len(eff_history) >= 5:
+            res = mad_detector(current, eff_history, threshold=threshold)
+            res["method"] = "auto:mad"
+        else:
+            res = zscore_detector(current, eff_history, threshold=threshold)
+            res["method"] = "auto:zscore"
+
+        if context:
+            res["context_used"] = list(context.keys())
+        return res
+
     raise ValueError(f"Unsupported method: {method}")

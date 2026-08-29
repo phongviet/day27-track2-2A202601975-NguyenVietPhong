@@ -25,35 +25,68 @@ def main() -> None:
     df = pd.read_csv(ROOT / "data" / "incoming" / "orders.csv")
     context = gx.get_context()
 
-    # Use unique names so re-running inside an ephemeral context is simple.
+    # 1. Create Expectation Suite
+    suite = context.suites.add(gx.ExpectationSuite(name="orders_suite"))
+    suite.add_expectation(
+        gx.expectations.ExpectColumnValuesToNotBeNull(column="order_id")
+    )
+    suite.add_expectation(
+        gx.expectations.ExpectColumnValuesToBeUnique(column="order_id")
+    )
+    suite.add_expectation(
+        gx.expectations.ExpectColumnValuesToBeBetween(column="amount", min_value=0)
+    )
+    suite.add_expectation(
+        gx.expectations.ExpectColumnValuesToBeInSet(
+            column="currency", value_set=["USD", "VND"]
+        )
+    )
+    suite.add_expectation(
+        gx.expectations.ExpectColumnValuesToNotBeNull(column="customer_id")
+    )
+    suite.add_expectation(
+        gx.expectations.ExpectColumnValuesToBeInSet(
+            column="status",
+            value_set=["pending", "completed", "refunded", "cancelled"],
+        )
+    )
+
+    # 2. Connect Data Source & Asset
     data_source = context.data_sources.add_pandas("orders_pandas")
     asset = data_source.add_dataframe_asset(name="orders_dataframe")
     batch_definition = asset.add_batch_definition_whole_dataframe("whole_orders")
-    batch = batch_definition.get_batch(batch_parameters={"dataframe": df})
 
-    expectations = [
-        gx.expectations.ExpectColumnValuesToNotBeNull(
-            column="order_id", severity="critical"
-        ),
-        gx.expectations.ExpectColumnValuesToBeUnique(
-            column="order_id", severity="critical"
-        ),
-        gx.expectations.ExpectColumnValuesToBeBetween(
-            column="amount", min_value=0, severity="critical"
-        ),
-        gx.expectations.ExpectColumnValuesToBeInSet(
-            column="currency", value_set=["USD", "VND"], severity="critical"
-        ),
-    ]
+    # 3. Validation Definition & Checkpoint
+    validation_definition = context.validation_definitions.add(
+        gx.ValidationDefinition(
+            name="orders_validation",
+            data=batch_definition,
+            suite=suite,
+        )
+    )
 
-    all_ok = True
-    for expectation in expectations:
-        result = batch.validate(expectation)
-        all_ok = all_ok and bool(result.success)
-        print(f"{expectation.__class__.__name__:<40} success={result.success}")
+    checkpoint = context.checkpoints.add(
+        gx.Checkpoint(
+            name="orders_checkpoint",
+            validation_definitions=[validation_definition],
+        )
+    )
 
-    print("\nStarter GX result:", "PASS" if all_ok else "FAIL")
-    print("TODO: package these expectations into a Suite + ValidationDefinition + Checkpoint + Actions.")
+    checkpoint_result = checkpoint.run(
+        batch_parameters={"dataframe": df}
+    )
+
+    all_ok = checkpoint_result.success
+    print("=== GREAT EXPECTATIONS SUITE CHECKPOINT ===")
+    print(f"Suite: {suite.name}")
+    print(f"Total Expectations: {len(suite.expectations)}")
+    print(f"Overall Result: {'PASS' if all_ok else 'FAIL'}")
+
+    # Action / triage based on severity
+    if not all_ok:
+        print("[ACTION REQUIRED] Critical checks failed! Action: QUARANTINE / BLOCK PIPELINE.")
+    else:
+        print("[ACTION] Data healthy. Action: PROCEED TO DOWNSTREAM MODELS.")
 
 
 if __name__ == "__main__":
